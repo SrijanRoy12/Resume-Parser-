@@ -1,11 +1,14 @@
 import streamlit as st
-import PyPDF2
+import pdfplumber
 import docx2txt
 import re
 from io import BytesIO
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
+import spacy
+from dateparser.search import search_dates
+import pandas as pd
 
 # Try to import streamlit_lottie with fallback
 try:
@@ -15,8 +18,17 @@ try:
 except ImportError:
     LOTTIE_ENABLED = False
 
+# Load English language model for spaCy
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    st.warning("spaCy model not found. Installing...")
+    import os
+    os.system("python -m spacy download en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
 # ======================
-# FUNCTION DEFINITIONS
+# ENHANCED EXTRACTION FUNCTIONS
 # ======================
 
 def extract_text(file) -> str:
@@ -24,10 +36,8 @@ def extract_text(file) -> str:
     text = ""
     try:
         if file.type == "application/pdf":
-            reader = PyPDF2.PdfReader(file)
-            for page in reader.pages:
-                page_text = page.extract_text() or ""
-                text += page_text + "\n"
+            with pdfplumber.open(file) as pdf:
+                text = "\n".join([page.extract_text() or "" for page in pdf.pages])
         elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             text = docx2txt.process(BytesIO(file.read()))
         elif file.type == "text/plain":
@@ -37,64 +47,77 @@ def extract_text(file) -> str:
         st.error(f"Error extracting text: {e}")
         return ""
 
-def extract_personal_info(text: str) -> Dict[str, str]:
-    """Extract personal information from resume text"""
-    info = {
-        "name": "Not found",
-        "email": [],
-        "phone": "Not found",
-        "linkedin": "Not found",
-        "github": "Not found",
-        "portfolio": "Not found"
-    }
+def extract_name(text: str) -> str:
+    """Enhanced name extraction using NLP"""
+    doc = nlp(text)
+    for ent in doc.ents:
+        if ent.label_ == "PERSON":
+            return ent.text.strip()
     
-    # Name extraction patterns
+    # Fallback to regex if NLP fails
     name_patterns = [
-        r'^([A-Z][A-Z\s]+)\n',
-        r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
-        r'(?<=\n)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?=\n)'
+        r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)",
+        r"(?<=\n)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?=\n)",
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\n|$)"
     ]
-    
     for pattern in name_patterns:
         match = re.search(pattern, text, re.MULTILINE)
         if match:
-            info["name"] = match.group(1).title()
-            break
-    
-    # Extract emails
-    info["email"] = list(set(re.findall(r'[\w\.-]+@[\w\.-]+', text)))
-    
-    # Extract phone number
-    phone_match = re.search(r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', text)
-    if phone_match:
-        info["phone"] = phone_match.group(0)
-    
-    # Extract URLs
+            return match.group(1).strip()
+    return "Not found"
+
+def extract_personal_info(text: str) -> Dict[str, str]:
+    """Extract personal information with enhanced techniques"""
+    info = {
+        "name": extract_name(text),
+        "email": list(set(re.findall(r'[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}', text))),
+        "phone": extract_phone_numbers(text),
+        "linkedin": extract_social_links(text, "linkedin"),
+        "github": extract_social_links(text, "github"),
+        "portfolio": extract_portfolio_links(text)
+    }
+    return info
+
+def extract_phone_numbers(text: str) -> str:
+    """Extract phone numbers with international support"""
+    phone_patterns = [
+        r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
+        r'\+?\d[\d\s-]{7,}\d'
+    ]
+    phones = []
+    for pattern in phone_patterns:
+        phones.extend(re.findall(pattern, text))
+    return ", ".join(set(phones)) if phones else "Not found"
+
+def extract_social_links(text: str, platform: str) -> str:
+    """Extract social media links"""
+    patterns = {
+        "linkedin": r"(https?://(?:www\.)?linkedin\.com/[^\s]+)",
+        "github": r"(https?://(?:www\.)?github\.com/[^\s]+)"
+    }
+    match = re.search(patterns[platform], text)
+    return match.group(0) if match else "Not found"
+
+def extract_portfolio_links(text: str) -> str:
+    """Extract portfolio/personal website links"""
     urls = re.findall(r'(https?://[^\s]+)', text)
     for url in urls:
         url = url.rstrip('.,)')
-        if 'linkedin.com' in url:
-            info["linkedin"] = url
-        elif 'github.com' in url:
-            info["github"] = url
-        elif any(x in url.lower() for x in ['portfolio', 'personal']):
-            info["portfolio"] = url
-    
-    return info
+        if any(x in url.lower() for x in ['portfolio', 'personal', 'website']):
+            return url
+    return "Not found"
 
 def extract_education(text: str) -> List[Dict[str, str]]:
-    """Extract education information from resume text"""
+    """Enhanced education extraction with degree detection"""
     education = []
     
-    # Find education section
-    edu_section = re.search(
-        r'EDUCATION.*?(\n.*?)(?=(?:EXPERIENCE|PROJECTS|CERTIFICATIONS|SKILLS|$))', 
-        text, 
-        re.DOTALL | re.IGNORECASE
-    )
+    # Find education section using multiple possible headers
+    edu_section = find_section(text, ["EDUCATION", "ACADEMIC BACKGROUND", "EDUCATIONAL QUALIFICATION"])
     
     if edu_section:
-        entries = re.split(r'\n(?=[A-Z][a-z])', edu_section.group(1))
+        # Split by likely education entries (FIXED REGEX)
+        entries = re.split(r'\n(?=[A-Z][a-z]+(?: University| Institute| College|\s[A-Z][a-z]+))', edu_section)
+        
         for entry in entries:
             lines = [line.strip() for line in entry.split('\n') if line.strip()]
             if not lines:
@@ -102,102 +125,107 @@ def extract_education(text: str) -> List[Dict[str, str]]:
                 
             edu_entry = {
                 "institution": lines[0],
-                "degree": "",
-                "dates": "",
-                "details": [],
-                "gpa": ""
+                "degree": extract_degree(" ".join(lines)),
+                "dates": extract_dates(" ".join(lines)),
+                "gpa": extract_gpa(" ".join(lines)),
+                "details": []
             }
             
+            # Extract additional details
             for line in lines[1:]:
-                # Extract dates
-                date_match = re.search(r'([A-Za-z]+\s+\d{4}\s*-\s*[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4}\s*-\s*Present)', line)
-                if date_match:
-                    edu_entry["dates"] = date_match.group(1)
-                    line = line.replace(date_match.group(1), "").strip()
-                
-                # Extract GPA
-                gpa_match = re.search(r'(CGPA|GPA|Score)\s*[:•]?\s*([\d\.]+)', line, re.IGNORECASE)
-                if gpa_match:
-                    edu_entry["gpa"] = f"{gpa_match.group(1)}: {gpa_match.group(2)}"
-                    line = line.replace(gpa_match.group(0), "").strip()
-                
-                # Extract degree
-                degree_match = re.search(r'(Bachelor|B\.?Tech|B\.?E|Master|M\.?Tech|Ph\.?D)', line, re.IGNORECASE)
-                if degree_match and not edu_entry["degree"]:
-                    edu_entry["degree"] = line.strip()
-                    continue
-                
-                # Extract coursework
-                if 'coursework' in line.lower():
-                    courses = re.split(r'[:,]', line, maxsplit=1)
-                    if len(courses) > 1:
-                        edu_entry["details"].append(f"<strong>Coursework:</strong> {courses[1].strip()}")
-                    continue
-                
-                # Add remaining lines as details
-                if line and not any(x in line.lower() for x in ['page', 'http']):
+                if not any(x in line.lower() for x in ['gpa', 'grade', 'score', 'coursework']):
                     edu_entry["details"].append(line)
             
             education.append(edu_entry)
     
     return education if education else [{"institution": "Education information not found"}]
 
+def extract_degree(text: str) -> str:
+    """Extract degree information"""
+    degree_patterns = [
+        r'(Bachelor[\w\s]*|B\.?[\w\s]*|Master[\w\s]*|M\.?[\w\s]*|Ph\.?D[\w\s]*)',
+        r'(Associate[\w\s]*|Diploma[\w\s]*)'
+    ]
+    for pattern in degree_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+def extract_dates(text: str) -> str:
+    """Extract dates using dateparser"""
+    dates = search_dates(text)
+    if dates:
+        return " - ".join([date[1].strftime("%b %Y") for date in dates[:2]])
+    return ""
+
+def extract_gpa(text: str) -> str:
+    """Extract GPA information"""
+    gpa_match = re.search(r'(GPA|CGPA|Score)\s*[:•]?\s*([\d\.]+/?[\d\.]*)', text, re.IGNORECASE)
+    return f"{gpa_match.group(1)}: {gpa_match.group(2)}" if gpa_match else ""
+
 def extract_experience(text: str) -> List[Dict[str, str]]:
-    """Extract work experience/projects from resume text"""
-    projects = []
+    """Enhanced experience extraction with position detection"""
+    experience = []
     
-    # Find experience section
-    exp_section = re.search(
-        r'(?:EXPERIENCE|PROJECTS|WORK HISTORY).*?(\n.*?)(?=(?:CERTIFICATIONS|SKILLS|EDUCATION|$))', 
-        text, 
-        re.DOTALL | re.IGNORECASE
-    )
+    # Find experience section using multiple possible headers
+    exp_section = find_section(text, ["EXPERIENCE", "WORK HISTORY", "PROFESSIONAL EXPERIENCE"])
     
     if exp_section:
-        # Split projects by title pattern
-        raw_projects = re.split(r'\n(?=[A-Z][a-z])', exp_section.group(1))
-        for proj in raw_projects:
-            if not proj.strip():
-                continue
-                
-            lines = [line.strip() for line in proj.split('\n') if line.strip()]
+        # Split by likely job entries
+        entries = re.split(r'\n(?=[A-Z][a-z]+(?: at |, |\s-\s|\n))', exp_section)
+        
+        for entry in entries:
+            lines = [line.strip() for line in entry.split('\n') if line.strip()]
             if not lines:
                 continue
                 
-            projects.append({
+            exp_entry = {
                 "title": lines[0],
-                "description": [re.sub(r'^[•→\-]\s*', '', line) for line in lines[1:] 
-                               if line and not re.search(r'page \d+', line.lower())]
-            })
+                "company": extract_company(lines[0]),
+                "dates": extract_dates(" ".join(lines)),
+                "description": []
+            }
+            
+            # Extract bullet points
+            for line in lines[1:]:
+                if line.strip() and not re.search(r'page \d+', line.lower()):
+                    exp_entry["description"].append(re.sub(r'^[•→\-]\s*', '', line))
+            
+            experience.append(exp_entry)
     
-    return projects if projects else [{"title": "Work experience not found"}]
+    return experience if experience else [{"title": "Experience information not found"}]
+
+def extract_company(text: str) -> str:
+    """Extract company name from position line"""
+    separators = [" at ", ", ", " - ", " | "]
+    for sep in separators:
+        if sep in text:
+            return text.split(sep)[-1].strip()
+    return ""
 
 def extract_certifications(text: str) -> Dict[str, List[str]]:
-    """Extract certifications and internships from resume text"""
+    """Enhanced certification extraction"""
     result = {
         'certifications': [],
         'internships': []
     }
     
     # Find certifications section
-    cert_section = re.search(
-        r'(?:CERTIFICATIONS|INTERNSHIPS|TRAINING).*?(\n.*?)(?=(?:SKILLS|EDUCATION|$))', 
-        text, 
-        re.DOTALL | re.IGNORECASE
-    )
+    cert_section = find_section(text, ["CERTIFICATIONS", "TRAINING", "LICENSES"])
     
     if cert_section:
         current = None
-        for line in cert_section.group(1).split('\n'):
+        for line in cert_section.split('\n'):
             line = line.strip()
             if not line:
                 continue
             
             # Check for section headers
-            if 'CERTIFICATIONS' in line.upper():
+            if any(x in line.upper() for x in ['CERTIFICAT', 'TRAINING', 'LICENSE']):
                 current = 'certifications'
                 continue
-            elif 'INTERNSHIPS' in line.upper():
+            elif 'INTERNSHIP' in line.upper():
                 current = 'internships'
                 continue
             
@@ -206,8 +234,7 @@ def extract_certifications(text: str) -> Dict[str, List[str]]:
                 line = line[1:].strip()
             
             # Clean and format
-            line = re.sub(r'\s+', ' ', line)
-            line = line.rstrip('.,')
+            line = re.sub(r'\s+', ' ', line).rstrip('.,')
             
             # Add to appropriate list
             if current and line:
@@ -216,47 +243,60 @@ def extract_certifications(text: str) -> Dict[str, List[str]]:
     return result
 
 def extract_skills(text: str) -> Dict[str, List[str]]:
-    """Extract skills from resume text"""
+    """Enhanced skills extraction with categorization"""
     skills = {
         "Programming Languages": [],
-        "Database": [],
-        "Problem Solving": [],
-        "Technologies": [],
-        "Other": []
+        "Frameworks & Libraries": [],
+        "Databases": [],
+        "Tools & Platforms": [],
+        "Soft Skills": []
     }
     
     # Find skills section
-    skills_section = re.search(
-        r'(?:SKILLS|TECHNICAL SKILLS).*?(\n.*?)(?=(?:CERTIFICATIONS|EDUCATION|$))', 
-        text, 
-        re.DOTALL | re.IGNORECASE
-    )
+    skills_section = find_section(text, ["SKILLS", "TECHNICAL SKILLS", "TECHNOLOGIES"])
     
     if skills_section:
-        current_category = "Other"
-        for line in skills_section.group(1).split('\n'):
+        # Categorize skills using keywords
+        for line in skills_section.split('\n'):
             line = line.strip()
             if not line:
                 continue
             
-            # Detect category lines
-            if ' - ' in line:
-                category, items = line.split(' - ', 1)
-                current_category = category.strip()
-                items = [item.strip() for item in re.split(r'[,;]', items) if item.strip()]
-                skills[current_category] = items
-            elif ':' in line:
-                category, items = line.split(':', 1)
-                current_category = category.strip()
-                items = [item.strip() for item in re.split(r'[,;]', items) if item.strip()]
-                skills[current_category] = items
-            else:
-                # Add to current category
-                items = [item.strip() for item in re.split(r'[,;]', line) if item.strip()]
-                skills[current_category].extend(items)
+            # Skip section headers
+            if any(x in line.lower() for x in ['skill', 'technical', 'technology']):
+                continue
+            
+            # Extract individual skills
+            items = [item.strip() for item in re.split(r'[,;]', line) if item.strip()]
+            
+            for item in items:
+                # Categorize based on keywords
+                if any(x in item.lower() for x in ['python', 'java', 'c++', 'javascript', 'ruby']):
+                    skills["Programming Languages"].append(item)
+                elif any(x in item.lower() for x in ['react', 'angular', 'django', 'flask', 'spring']):
+                    skills["Frameworks & Libraries"].append(item)
+                elif any(x in item.lower() for x in ['mysql', 'mongodb', 'postgresql', 'oracle']):
+                    skills["Databases"].append(item)
+                elif any(x in item.lower() for x in ['docker', 'kubernetes', 'aws', 'azure', 'git']):
+                    skills["Tools & Platforms"].append(item)
+                else:
+                    skills["Soft Skills"].append(item)
     
     # Remove empty categories
     return {k: v for k, v in skills.items() if v}
+
+def find_section(text: str, possible_headers: List[str]) -> str:
+    """Find a section by trying multiple possible headers"""
+    for header in possible_headers:
+        pattern = rf'{header}.*?(\n.*?)(?=(?:{"|".join(possible_headers)}|\n\s*\n|$))'
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+# ======================
+# DISPLAY FUNCTIONS
+# ======================
 
 def display_personal_info(info: Dict[str, str]):
     """Display personal information section"""
@@ -311,33 +351,23 @@ def display_education(education: List[Dict[str, str]]):
         
         st.markdown("</div>", unsafe_allow_html=True)
 
-def display_experience(projects: List[Dict[str, str]]):
+def display_experience(experience: List[Dict[str, str]]):
     """Display experience/projects section with improved formatting"""
     with st.container():
         st.markdown("""
         <div class="card animate-fade" style="animation-delay: 0.3s">
-            <h2>💼 Work Experience & Projects</h2>
+            <h2>💼 Work Experience</h2>
         """, unsafe_allow_html=True)
         
-        for proj in projects:
-            title = proj.get('title', '')
-            description = proj.get('description', [])
-            
-            # Skip empty entries
-            if not title and not description:
-                continue
+        for exp in experience:
+            with st.expander(f"**{exp.get('title', '')}** at **{exp.get('company', '')}**"):
+                if exp.get('dates'):
+                    st.markdown(f"**Period:** {exp['dates']}")
                 
-            with st.expander(f"**{title}**" if title else "Project"):
-                # Combine bullet points into paragraphs when possible
-                full_description = " ".join(desc for desc in description if desc)
-                st.markdown(full_description)
-                
-                # Add GitHub links if found in description
-                github_links = [desc for desc in description if 'github.com' in desc.lower()]
-                if github_links:
-                    st.markdown("**Links:**")
-                    for link in github_links:
-                        st.markdown(f"[🔗 GitHub Repo]({link})")
+                if exp.get('description'):
+                    st.markdown("**Responsibilities:**")
+                    for desc in exp['description']:
+                        st.markdown(f"- {desc}")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -355,9 +385,6 @@ def display_certifications(certifications: List[str], internships: List[str]):
             if certifications:
                 st.markdown("**Certifications**")
                 for cert in certifications:
-                    # Clean up certification text
-                    cert = re.sub(r'^\d+\s*[\.\)]\s*', '', cert)  # Remove numbering
-                    cert = cert.strip('•- ')
                     st.markdown(f"- {cert}")
             else:
                 st.markdown("No certifications found")
@@ -366,17 +393,7 @@ def display_certifications(certifications: List[str], internships: List[str]):
             if internships:
                 st.markdown("**Internships**")
                 for intern in internships:
-                    # Clean up internship text
-                    intern = re.sub(r'^\d+\s*[\.\)]\s*', '', intern)  # Remove numbering
-                    intern = intern.strip('•- ')
-                    # Extract duration if present
-                    duration_match = re.search(r'(\d+\s+month)', intern)
-                    if duration_match:
-                        duration = duration_match.group(1)
-                        intern = intern.replace(duration_match.group(0), '').strip()
-                        st.markdown(f"- {intern} ({duration})")
-                    else:
-                        st.markdown(f"- {intern}")
+                    st.markdown(f"- {intern}")
             else:
                 st.markdown("No internships found")
         
@@ -390,38 +407,14 @@ def display_skills(skills: Dict[str, List[str]]):
             <h2>🛠 Skills</h2>
         """, unsafe_allow_html=True)
         
-        # Group similar skill categories
-        skill_groups = {
-            "Technical Skills": ["Programming Languages", "Technologies", "Database"],
-            "AI/ML": ["Machine Learning", "Artificial Intelligence", "NLP"],
-            "Tools & Platforms": ["Frameworks", "Cloud", "DevOps"]
-        }
-        
-        # Create columns for better layout
+        # Display skills in 2 columns
+        skill_items = list(skills.items())
         cols = st.columns(2)
-        col_idx = 0
         
-        for group_name, categories in skill_groups.items():
-            with cols[col_idx % 2]:
-                st.markdown(f"**{group_name}**")
-                for category in categories:
-                    if category in skills:
-                        # Format skills as comma-separated list
-                        skills_list = ", ".join(skills[category])
-                        st.markdown(f"- *{category}:* {skills_list}")
-                st.markdown("")  # Add spacing
-            col_idx += 1
-        
-        # Display remaining skills not in groups
-        remaining_categories = [cat for cat in skills.keys() 
-                              if cat not in [item for sublist in skill_groups.values() 
-                                           for item in sublist]]
-        
-        if remaining_categories:
-            with st.expander("Additional Skills"):
-                for category in remaining_categories:
-                    skills_list = ", ".join(skills[category])
-                    st.markdown(f"**{category}:** {skills_list}")
+        for i, (category, items) in enumerate(skill_items):
+            with cols[i % 2]:
+                st.markdown(f"**{category}**")
+                st.markdown(", ".join(items))
         
         st.markdown("</div>", unsafe_allow_html=True)
 
