@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resume Parser</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Resume Parser</h1>
+        <p>Upload a resume to extract key information</p>
+        
+        <div class="upload-container">
+            <input type="file" id="resume-upload" accept=".pdf,.docx,.txt">
+            <button id="parse-btn" class="btn">Parse Resume</button>
+        </div>
+        
+        <div class="results-container">
+            <div class="result-card">
+                <h3>Name</h3>
+                <p id="name-result">-</p>
+            </div>
+            
+            <div class="result-card">
+                <h3>Skills</h3>
+                <ul id="skills-result"></ul>
+            </div>
+            
+            <div class="result-card">
+                <h3>Education</h3>
+                <ul id="education-result"></ul>
+            </div>
+            
+            <div class="result-card">
+                <h3>Certifications</h3>
+                <ul id="certifications-result"></ul>
+            </div>
+            
+            <div class="result-card">
+                <h3>Internships</h3>
+                <ul id="internships-result"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
