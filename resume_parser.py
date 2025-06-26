@@ -48,7 +48,8 @@ def extract_text(file) -> str:
         return ""
 
 def extract_name(text: str) -> str:
-    """Enhanced name extraction using NLP"""
+    """Enhanced name extraction using NLP with fallback to 'Srijan Roy'"""
+    YOUR_NAME = "Srijan Roy"
     doc = nlp(text)
     for ent in doc.ents:
         if ent.label_ == "PERSON":
@@ -64,7 +65,7 @@ def extract_name(text: str) -> str:
         match = re.search(pattern, text, re.MULTILINE)
         if match:
             return match.group(1).strip()
-    return "Not found"
+    return YOUR_NAME
 
 def extract_personal_info(text: str) -> Dict[str, str]:
     """Extract personal information with enhanced techniques"""
@@ -295,7 +296,7 @@ def find_section(text: str, possible_headers: List[str]) -> str:
     return ""
 
 # ======================
-# DISPLAY FUNCTIONS
+# DISPLAY FUNCTIONS (UPDATED)
 # ======================
 
 def display_personal_info(info: Dict[str, str]):
@@ -352,22 +353,22 @@ def display_education(education: List[Dict[str, str]]):
         st.markdown("</div>", unsafe_allow_html=True)
 
 def display_experience(experience: List[Dict[str, str]]):
-    """Display experience/projects section with improved formatting"""
+    """Display experience/projects section with black text"""
     with st.container():
         st.markdown("""
-        <div class="card animate-fade" style="animation-delay: 0.3s">
-            <h2>💼 Work Experience</h2>
+        <div class="card animate-fade" style="animation-delay: 0.3s; color: black !important;">
+            <h2 style="color: black !important;">💼 Work Experience</h2>
         """, unsafe_allow_html=True)
         
         for exp in experience:
             with st.expander(f"**{exp.get('title', '')}** at **{exp.get('company', '')}**"):
                 if exp.get('dates'):
-                    st.markdown(f"**Period:** {exp['dates']}")
+                    st.markdown(f"**Period:** {exp['dates']}", unsafe_allow_html=True)
                 
                 if exp.get('description'):
-                    st.markdown("**Responsibilities:**")
+                    st.markdown("**Responsibilities:**", unsafe_allow_html=True)
                     for desc in exp['description']:
-                        st.markdown(f"- {desc}")
+                        st.markdown(f"- {desc}", unsafe_allow_html=True)
         
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -400,11 +401,11 @@ def display_certifications(certifications: List[str], internships: List[str]):
         st.markdown("</div>", unsafe_allow_html=True)
 
 def display_skills(skills: Dict[str, List[str]]):
-    """Display skills section with improved formatting"""
+    """Display skills section with black text"""
     with st.container():
         st.markdown("""
-        <div class="card animate-fade" style="animation-delay: 0.5s">
-            <h2>🛠 Skills</h2>
+        <div class="card animate-fade" style="animation-delay: 0.5s; color: black !important;">
+            <h2 style="color: black !important;">🛠 Skills</h2>
         """, unsafe_allow_html=True)
         
         # Display skills in 2 columns
@@ -413,8 +414,8 @@ def display_skills(skills: Dict[str, List[str]]):
         
         for i, (category, items) in enumerate(skill_items):
             with cols[i % 2]:
-                st.markdown(f"**{category}**")
-                st.markdown(", ".join(items))
+                st.markdown(f"**{category}**", unsafe_allow_html=True)
+                st.markdown(", ".join(items), unsafe_allow_html=True)
         
         st.markdown("</div>", unsafe_allow_html=True)
 
